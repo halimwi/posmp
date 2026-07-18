@@ -67,17 +67,6 @@ Resources:
             TableName: !Ref PosTable
       FunctionUrlConfig:
         AuthType: NONE # App handles auth via JWT; the endpoint itself is public.
-        Cors:
-          AllowOrigins:
-            - "*"
-          AllowMethods:
-            - GET
-            - POST
-            - PUT
-            - DELETE
-          AllowHeaders:
-            - Content-Type
-            - Authorization
 
   # -------------------------------------------------------------------------
   # Frontend: private S3 bucket served through CloudFront (gives HTTPS).
