@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# SAM / build artifacts
+.aws-sam/
+packaged.yaml
+samconfig.toml
+
+# Local config generated after deploy
+frontend/config.js
+
+# Env / secrets
+.env
+*.local
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  posmp - a low-cost Point of Sale system.
+  Static site on S3 + CloudFront, API on a Lambda Function URL, data in DynamoDB.
+  No API Gateway and no RDS, so idle cost is essentially zero.
+
+Parameters:
+  AdminUsername:
+    Type: String
+    Default: admin
+    Description: Username seeded on first login.
+  AdminPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Initial admin password (min 8 chars). Change it after first login.
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Random secret used to sign session tokens (min 16 chars).
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64 # Graviton: cheaper per ms than x86.
+
+Resources:
+  # -------------------------------------------------------------------------
+  # Data: one on-demand DynamoDB table (pay only for what you use).
+  # -------------------------------------------------------------------------
+  PosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  # -------------------------------------------------------------------------
+  # Backend: one Lambda, reached through a free HTTPS Function URL.
+  # -------------------------------------------------------------------------
+  PosFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: index.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref PosTable
+          JWT_SECRET: !Ref JwtSecret
+          ADMIN_USERNAME: !Ref AdminUsername
+          ADMIN_PASSWORD: !Ref AdminPassword
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PosTable
+      FunctionUrlConfig:
+        AuthType: NONE # App handles auth via JWT; the endpoint itself is public.
+        Cors:
+          AllowOrigins:
+            - "*"
+          AllowMethods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+          AllowHeaders:
+            - Content-Type
+            - Authorization
+
+  # -------------------------------------------------------------------------
+  # Frontend: private S3 bucket served through CloudFront (gives HTTPS).
+  # -------------------------------------------------------------------------
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SiteOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100 # Cheapest edge footprint (NA + EU).
+        Origins:
+          - Id: s3origin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !Ref SiteOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: s3origin
+          ViewerProtocolPolicy: redirect-to-https
+          # AWS managed "CachingOptimized" policy.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}"
+
+Outputs:
+  ApiUrl:
+    Description: Lambda Function URL — put this in frontend/config.js
+    Value: !GetAtt PosFunctionUrl.FunctionUrl
+  SiteBucketName:
+    Description: S3 bucket to upload the frontend into
+    Value: !Ref SiteBucket
+  SiteUrl:
+    Description: Public URL of the POS app
+    Value: !Sub "https://${SiteDistribution.DomainName}"
+  DistributionId:
+    Description: CloudFront distribution id (for cache invalidations)
+    Value: !Ref SiteDistribution

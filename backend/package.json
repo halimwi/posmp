@@ -1,0 +1,13 @@
+{
+  "name": "posmp-backend",
+  "version": "1.0.0",
+  "description": "Point of Sale Lambda backend (single function, DynamoDB single-table).",
+  "type": "module",
+  "main": "index.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
