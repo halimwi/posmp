@@ -1,13 +1,39 @@
-# posmp — a low-cost Point of Sale for a small shop
+# posmp — low-cost retail management for a small shop
 
-A minimal, self-hostable POS for a mom-and-pop store. It runs almost entirely
-inside the AWS free tier, and after the free tier a low-volume shop should pay
-roughly **$0.50–$2/month**.
+A minimal, self-hostable retail app for a single shop: point of sale, inventory
+with cost of goods, and sales/profit reports. Prices are in Indonesian Rupiah
+(IDR). It runs almost entirely inside the AWS free tier, and after the free tier
+a low-volume shop should pay roughly **$1–3/month**.
 
-- **Register** — tap products into a cart, pick a payment type, charge.
-- **Products** — add/edit/delete items, optional stock tracking (auto-decrements on sale).
-- **Reports** — today's totals by payment type, plus recent transactions.
-- Single owner/cashier login to start; add more users later.
+- **Register** — scan a barcode or tap products, discount, cash/card/QRIS/transfer,
+  change calculation, printable receipt.
+- **Products** — SKU/barcode, category, cost of goods and selling price with margin,
+  CSV import/export.
+- **Inventory** — receive stock (updates cost as a weighted average), stock counts,
+  damaged/lost and other adjustments with a full movement log, low-stock alerts,
+  stock value at cost and at price.
+- **Refunds** — refund some or all items of a sale, optionally back into stock.
+- **Reports** — today / yesterday / 7 days / month / custom range: net sales, gross
+  profit and margin, cost of goods sold, discounts, refunds, payment types, daily
+  breakdown, best sellers, categories, CSV export.
+- **Users** — managers add operators and other managers, reset passwords, deactivate.
+
+## Roles
+
+| | Manager | Operator |
+|---|---|---|
+| Record sales at the register | ✓ | ✓ |
+| See own sales for today, reprint receipts | ✓ | ✓ |
+| See cost of goods | ✓ | — |
+| Add/edit products, prices, cost of goods, CSV import | ✓ | — |
+| Receive stock and adjust inventory | ✓ | — |
+| Refunds | ✓ | — |
+| Reports and sales export | ✓ | — |
+| Manage users | ✓ | — |
+
+Roles are enforced by the API, not just hidden in the UI. Sale prices and costs
+are read from the product records on the server, so the register cannot be used
+to change a price. Role changes and deactivations take effect on the next request.
 
 ## Architecture
 
@@ -21,7 +47,7 @@ roughly **$0.50–$2/month**.
 |-------|---------|-----|
 | Static site | **S3 (private) + CloudFront** | Pennies of storage; CloudFront adds HTTPS and 1 TB/mo free egress. |
 | API | **Lambda + Function URL** | No API Gateway, so no per-request gateway bill. Lambda's 1M free requests/mo covers a small shop. |
-| Database | **DynamoDB on-demand** | Pay-per-request, 25 GB free. No always-on cost like RDS (~$12+/mo). |
+| Database | **DynamoDB on-demand** | Pay-per-request, 25 GB free. No always-on cost like RDS (~$12+/mo). Point-in-time recovery on (~$0.20/GB-month). |
 | Auth | **JWT signed in Lambda** | No Cognito needed for a few users. Passwords hashed with PBKDF2. |
 | Compute arch | **arm64 (Graviton)** | Cheaper per-ms than x86. |
 
@@ -49,7 +75,7 @@ last the first 12 months.
 
 ```
 backend/
-  index.mjs          Single Lambda: auth, products, sales, reports (zero npm deps)
+  index.mjs          Single Lambda: auth, users, products, stock, sales, refunds, reports (zero npm deps)
   package.json
 frontend/
   index.html         Vanilla-JS single-page app (no build step)
@@ -58,6 +84,8 @@ frontend/
   config.example.js  Template for the generated config.js
 template.yaml        AWS SAM: DynamoDB + Lambda(+URL) + S3 + CloudFront
 deploy.sh            Build, deploy, wire the frontend, upload the site
+dev/                 Local server + in-memory DynamoDB for development
+test/                API tests (node --test) against the real handler
 ```
 
 ## Deploy
@@ -69,16 +97,20 @@ You need the [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-
 ./deploy.sh
 ```
 
-The first run is guided — SAM will ask for a stack name and two values:
+It deploys to **Singapore (`ap-southeast-1`)** by default; set `REGION=...` to change it.
+The first run is guided — SAM will ask for a stack name and these values:
 
-- **AdminPassword** — the initial password for the `admin` user (min 8 chars).
+- **AdminPassword** — the initial password for the `admin` manager (min 8 chars).
+- **ShopName** — shown on the sign-in screen and receipts (default `Jaya Mandiri`).
+- **ShopTzOffsetMinutes** — the shop's time zone for daily reports (default `420`, WIB).
 - **JwtSecret** — any long random string used to sign sessions. Generate one with:
   ```bash
   openssl rand -hex 32
   ```
 
 When it finishes it prints your live URL (a `*.cloudfront.net` address). Open
-it, sign in as `admin`, and start adding products.
+it, sign in as `admin`, change the password (click your name in the top bar),
+add your products, then add an operator account under **Users**.
 
 Re-running `./deploy.sh` later picks up your saved settings, redeploys code, and
 re-uploads the site.
@@ -98,16 +130,14 @@ aws cloudfront create-invalidation --distribution-id <DistributionId> --paths "/
 
 ## Local development
 
-The frontend is static, so any static server works:
+Runs the frontend and the real Lambda handler on one port, backed by an
+in-memory DynamoDB (data is lost when it stops). Needs Node 20+.
 
 ```bash
-cd frontend && python3 -m http.server 8080
+npm install
+npm run dev        # http://localhost:8080, sign in as admin / localpass123
+npm test           # API tests
 ```
-
-Open <http://localhost:8080>. On the login screen enter your deployed **API URL**
-(the `ApiUrl` output) — it's saved in the browser. The backend has no local
-emulator here; point local dev at the deployed Lambda, or use `sam local
-start-lambda` if you want to run it offline.
 
 ## Data model (DynamoDB single table)
 
@@ -118,9 +148,22 @@ One table, partitioned by record type so every list is a single `Query`:
 | User | `USER` | `<username>` |
 | Product | `PRODUCT` | `<productId>` |
 | Sale | `SALE` | `<ISO-timestamp>#<saleId>` |
+| Refund | `REFUND` | `<ISO-timestamp>#<refundId>` |
+| Stock movement | `MOVE` | `<ISO-timestamp>#<moveId>` |
 
-Sales sort chronologically by `sk`, so "recent sales" and "today's total" are
-plain range queries with no secondary index.
+Sales, refunds and stock movements sort chronologically by `sk`, so any date
+range is a plain range query with no secondary index. Each sale line keeps the
+price and cost of goods at the time of sale, so later price changes don't
+rewrite past profit.
+
+Money is stored as whole Rupiah. Day boundaries for reports use the shop's
+time zone (`SHOP_TZ_OFFSET_MINUTES`), not UTC.
+
+### Upgrading an existing deployment
+
+Older `admin` users become managers and `cashier` users become operators
+automatically. Products created before this version have no cost of goods
+(Rp 0) until a manager sets it, so their profit will read as 100% margin.
 
 ## Security notes
 
@@ -134,8 +177,6 @@ plain range queries with no secondary index.
 
 ## Extending
 
-- **More cashiers:** add `USER` items (a small admin screen or a one-off script).
-- **Receipts:** the sale record has everything needed to render/print a receipt.
-- **CSV export:** query the `SALE` partition by date range.
-- **Barcode scanning:** most USB/Bluetooth scanners act as a keyboard — wire the
-  input to the product `sku` lookup.
+- **More shops:** add a `storeId` to products, stock and sales, and a store picker.
+- **Suppliers and purchase orders:** a `SUPPLIER` partition and receiving against a PO.
+- **Payments:** QRIS or card terminal integration on the register.

@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  posmp - a low-cost Point of Sale system.
+  posmp - a low-cost retail management app (POS, inventory, reports).
   Static site on S3 + CloudFront, API on a Lambda Function URL, data in DynamoDB.
   No API Gateway and no RDS, so idle cost is essentially zero.
 
@@ -9,23 +9,31 @@ Parameters:
   AdminUsername:
     Type: String
     Default: admin
-    Description: Username seeded on first login.
+    Description: Manager username seeded on first login.
   AdminPassword:
     Type: String
     NoEcho: true
     MinLength: 8
-    Description: Initial admin password (min 8 chars). Change it after first login.
+    Description: Initial manager password (min 8 chars). Change it after first login.
   JwtSecret:
     Type: String
     NoEcho: true
     MinLength: 16
     Description: Random secret used to sign session tokens (min 16 chars).
+  ShopName:
+    Type: String
+    Default: Jaya Mandiri
+    Description: Shown on the sign-in screen, the top bar and receipts.
+  ShopTzOffsetMinutes:
+    Type: Number
+    Default: 420
+    Description: Shop time zone as minutes east of UTC, for daily reports (420 = WIB, 480 = WITA, 540 = WIT).
 
 Globals:
   Function:
     Timeout: 10
     MemorySize: 256
-    Runtime: nodejs20.x
+    Runtime: nodejs22.x
     Architectures:
       - arm64 # Graviton: cheaper per ms than x86.
 
@@ -35,8 +43,14 @@ Resources:
   # -------------------------------------------------------------------------
   PosTable:
     Type: AWS::DynamoDB::Table
+    # Sales and stock history are business records: keep the table if the
+    # stack is deleted or the resource would be replaced.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true # Restore to any second in the last 35 days.
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -62,6 +76,8 @@ Resources:
           JWT_SECRET: !Ref JwtSecret
           ADMIN_USERNAME: !Ref AdminUsername
           ADMIN_PASSWORD: !Ref AdminPassword
+          SHOP_NAME: !Ref ShopName
+          SHOP_TZ_OFFSET_MINUTES: !Ref ShopTzOffsetMinutes
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref PosTable
@@ -95,7 +111,7 @@ Resources:
       DistributionConfig:
         Enabled: true
         DefaultRootObject: index.html
-        PriceClass: PriceClass_100 # Cheapest edge footprint (NA + EU).
+        PriceClass: PriceClass_200 # Includes Asia edge locations (Singapore, Jakarta).
         Origins:
           - Id: s3origin
             DomainName: !GetAtt SiteBucket.RegionalDomainName

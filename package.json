@@ -1,0 +1,15 @@
+{
+  "name": "posmp",
+  "private": true,
+  "type": "module",
+  "description": "Local development and tests for posmp. Not deployed; the Lambda only ships backend/.",
+  "scripts": {
+    "dev": "node dev/local-server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "dynalite": "^4.0.0"
+  }
+}
