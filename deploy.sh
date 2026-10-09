@@ -11,7 +11,7 @@
 set -euo pipefail
 
 STACK="${STACK:-posmp}"
-REGION="${REGION:-$(aws configure get region || echo us-east-1)}"
+REGION="${REGION:-ap-southeast-1}" # Singapore
 
 echo "==> Building Lambda"
 sam build
@@ -20,7 +20,7 @@ echo "==> Deploying stack '$STACK' in $REGION"
 if [ -f samconfig.toml ]; then
   sam deploy --stack-name "$STACK" --region "$REGION"
 else
-  # First deploy: ask for admin password + JWT secret interactively.
+  # First deploy: ask for the manager password + JWT secret interactively.
   sam deploy --guided --stack-name "$STACK" --region "$REGION" \
     --capabilities CAPABILITY_IAM
 fi
